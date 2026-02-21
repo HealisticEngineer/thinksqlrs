@@ -1,0 +1,21 @@
+[package]
+name = "sqlthinkrs"
+version = "0.1.2"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tiberius = { version = "0.12", features = ["sql-browser-tokio", "chrono"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "rt-multi-thread"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+once_cell = "1.20"
+regex = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
