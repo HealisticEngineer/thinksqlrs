@@ -5,7 +5,7 @@ $SoPath = "./target/release/libsqlthinkrs.so"
 $ServerName = "localhost"
 $Database = "tempdb"
 $UserId = "sa"
-$Password = "SomeStrongPassword!" # Change this to your actual SA password
+$Password = "NeverSafe2Day!"
 
 Write-Host "=== SQLThinkRS Rust .so Test (Linux) ===" -ForegroundColor Cyan
 Write-Host ""
