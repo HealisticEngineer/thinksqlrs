@@ -49,18 +49,46 @@ if exist target (
 )
 echo.
 
+REM Read current version from Cargo.toml and increment patch
+for /f "tokens=3 delims= " %%V in ('findstr /r /c:"^version" Cargo.toml') do set CURRENT_VERSION=%%~V
+for /f "tokens=1,2,3 delims=." %%A in ("%CURRENT_VERSION%") do (
+    set MAJOR=%%A
+    set MINOR=%%B
+    set /a PATCH=%%C+1
+)
+set NEW_VERSION=%MAJOR%.%MINOR%.%PATCH%
+
+echo Incrementing version: %CURRENT_VERSION% -^> %NEW_VERSION%
+echo.
+
+REM Update Cargo.toml
+powershell -NoProfile -Command "(Get-Content Cargo.toml) -replace 'version = \"%CURRENT_VERSION%\"', 'version = \"%NEW_VERSION%\"' | Set-Content Cargo.toml"
+
 cargo build --release
 
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo ========================================
-    echo Build successful!
+    echo Build successful!  Version: %NEW_VERSION%
     echo DLL location: target\release\sqlthinkrs.dll
     echo ========================================
+
+    echo.
+    echo Deploying DLL to Windows PowerShell module...
+    copy /y target\release\sqlthinkrs.dll module\windows\SQLThinkRS\sqlthinkrs.dll >nul
+    echo   [OK] Copied sqlthinkrs.dll
+
+    echo Updating module version to %NEW_VERSION%...
+    powershell -NoProfile -Command "$c = Get-Content 'module\windows\SQLThinkRS\SQLThinkRS.psd1' -Raw; $c = $c -replace \"ModuleVersion     = '[0-9]+\.[0-9]+\.[0-9]+'\", \"ModuleVersion     = '%NEW_VERSION%'\"; Set-Content 'module\windows\SQLThinkRS\SQLThinkRS.psd1' $c -NoNewline"
+    echo   [OK] Updated Windows module manifest
+
     echo.
     echo To test, run: powershell -ExecutionPolicy Bypass -File test.ps1
 ) else (
     echo.
     echo Build failed with error code %ERRORLEVEL%
+    REM Revert Cargo.toml version on failure
+    powershell -NoProfile -Command "(Get-Content Cargo.toml) -replace 'version = \"%NEW_VERSION%\"', 'version = \"%CURRENT_VERSION%\"' | Set-Content Cargo.toml"
+    echo Reverted Cargo.toml version to %CURRENT_VERSION%
     exit /b %ERRORLEVEL%
 )
