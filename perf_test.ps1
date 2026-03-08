@@ -56,7 +56,7 @@ param(
     [string]$ServerName   = "localhost",
     [string]$Database     = "tempdb",
     [string]$UserId       = "sa",
-    [string]$Password     = "NeverSafe2Day!",
+    [string]$Password     = "somestrongpassword!",
     [int]$Iterations      = 150,
     [int]$BulkRows        = 50000
 )
