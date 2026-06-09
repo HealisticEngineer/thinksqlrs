@@ -1,0 +1,133 @@
+
+======================================================================
+ PERFORMANCE COMPARISON: SQLServer Module vs .NET SqlClient vs SQLThinkRS
+======================================================================
+
+  Server       : localhost
+  Database     : tempdb
+  Iterations   : 150
+  Bulk Rows    : 50000
+
+--- Loading SqlServer PowerShell module ---
+  [FAIL] SqlServer module not available - skipping. Install with: Install-Module SqlServer
+
+--- Loading .NET SqlClient ---
+  [OK] .NET SqlClient loaded (System.Data.SqlClient)
+
+--- Loading SQLThinkRS DLL ---
+  [OK] SQLThinkRS DLL loaded
+
+======================================================================
+ BENCHMARK: Connection Time (150 iterations)
+======================================================================
+
+--- .NET SqlClient - Connection ---
+  [OK] Total: 196.6 ms  |  Avg: 1.31 ms
+
+--- SQLThinkRS - Connection ---
+  [OK] Total: 204.4 ms  |  Avg: 1.36 ms
+
+======================================================================
+ BENCHMARK: Repeated SELECT (150 iterations, persistent connection)
+======================================================================
+  Seeded tempdb.dbo.PerfTest table (5 rows)
+
+--- .NET SqlClient - Repeated SELECT (persistent connection) ---
+  [OK] Total: 173.1 ms  |  Avg: 1.15 ms
+
+--- SQLThinkRS - Repeated SELECT (persistent connection) ---
+  [OK] Total: 98 ms  |  Avg: 0.65 ms
+
+======================================================================
+ BENCHMARK: Bulk INSERT (50000 rows)
+======================================================================
+
+--- .NET SqlClient - Bulk INSERT (persistent connection) ---
+  [OK] Total: 40680 ms  |  Avg/row: 0.814 ms
+
+--- SQLThinkRS - Bulk INSERT (persistent connection) ---
+  [OK] Total: 32179.1 ms  |  Avg/row: 0.644 ms
+
+======================================================================
+ BENCHMARK: Large Result Set SELECT (50000 rows, 150 iterations)
+======================================================================
+  Seeded tempdb.dbo.PerfLarge table (50000 rows)
+
+--- .NET SqlClient - Large SELECT (50000 rows, persistent connection) ---
+  [OK] Total: 3721.6 ms  |  Avg: 24.81 ms
+
+--- SQLThinkRS - Large SELECT (50000 rows, persistent connection) ---
+  [OK] Total: 4461.2 ms  |  Avg: 29.74 ms
+
+======================================================================
+ BENCHMARK: Snapshot Isolation - Reading while rows are locked
+======================================================================
+
+  This test holds an exclusive UPDATE lock on rows via an open transaction,
+  then attempts to SELECT those same rows from a second connection.
+  Without snapshot isolation the read BLOCKS (times out). With snapshot
+  isolation (SQLThinkRS built-in) the read succeeds instantly.
+
+  Enabled ALLOW_SNAPSHOT_ISOLATION on tempdb (active, waited 0ms)
+  Seeded tempdb.dbo.PerfLock (3 rows)
+  Holding exclusive lock on PerfLock (Id=1) via open transaction...
+
+--- .NET SqlClient - SELECT under lock (READ COMMITTED, 3s timeout) ---
+  [BLOCKED] Timed out after 3017.1 ms - read was BLOCKED by the lock
+
+--- SQLThinkRS - SELECT under lock (SNAPSHOT isolation, built-in) ---
+  [OK] Completed in 2.8 ms - read 3 rows INSTANTLY (not blocked!)
+  Data returned (pre-update snapshot):
+
+Id Name  Value
+-- ----  -----
+ 1 Alpha    10
+ 2 Beta     20
+ 3 Gamma    30
+
+
+  Lock released (transaction rolled back)
+
+--- Cleanup ---
+  [OK] Temporary tables dropped
+
+======================================================================
+ RESULTS SUMMARY
+======================================================================
+
+
+Provider       Operation               Iterations Total (ms) Avg (ms)
+--------       ---------               ---------- ---------- --------
+.NET SqlClient Connect+Query(SELECT 1)        150    196.613    1.311
+SQLThinkRS     Connect+Query(SELECT 1)        150    204.425    1.363
+.NET SqlClient SELECT (5 rows)                150    173.126    1.154
+SQLThinkRS     SELECT (5 rows)                150     98.009    0.653
+.NET SqlClient INSERT (50000 rows)          50000  40680.016    0.814
+SQLThinkRS     INSERT (50000 rows)          50000   32179.07    0.644
+.NET SqlClient SELECT (50000 rows)            150   3721.623   24.811
+SQLThinkRS     SELECT (50000 rows)            150   4461.246   29.742
+.NET SqlClient SELECT under lock                1   3017.145 3017.145
+SQLThinkRS     SELECT under lock                1       2.85     2.85
+
+
+  Connect+Query(SELECT 1)
+    .NET SqlClient            1.311 ms avg  (1x) *
+    SQLThinkRS                1.363 ms avg  (1.04x) *
+
+  SELECT (5 rows)
+    SQLThinkRS                0.653 ms avg  (1x) *
+    .NET SqlClient            1.154 ms avg  (1.77x) **
+
+  INSERT (50000 rows)
+    SQLThinkRS                0.644 ms avg  (1x) *
+    .NET SqlClient            0.814 ms avg  (1.26x) *
+
+  SELECT (50000 rows)
+    .NET SqlClient           24.811 ms avg  (1x) *
+    SQLThinkRS               29.742 ms avg  (1.2x) *
+
+  SELECT under lock
+    SQLThinkRS                2.850 ms avg  (1x) *
+    .NET SqlClient        3,017.145 ms avg  (1058.65x) **************************************************
+
+Benchmark complete.
