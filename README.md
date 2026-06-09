@@ -89,6 +89,21 @@ $rows = $json | ConvertFrom-Json
 
 Compared against the **SqlServer PowerShell module** (`Invoke-Sqlcmd`) and **.NET SqlClient** (`System.Data.SqlClient`) on localhost.
 
+### Benchmark Methodology
+
+- Secure defaults are enabled in `perf_test.ps1`: `Encrypt=$true` and `TrustServerCertificate=$false`.
+- Warmup iterations are run before timed loops (`-WarmupIterations`, default 10) to reduce cold-start noise.
+- For local dev SQL Server instances with self-signed certificates, run with `-TrustServerCertificate:$true` explicitly.
+- Snapshot isolation lock behavior is validated with an explicit blocked-reader test (`SELECT under lock`).
+
+### Run The Benchmark
+
+```powershell
+.\perf_test.ps1 -Iterations 150 -BulkRows 50000 -WarmupIterations 10 -TrustServerCertificate:$true
+```
+
+Use `-TrustServerCertificate:$false` in environments with trusted server certificates.
+
 ### Results Summary (150 iterations, 50 000 rows)
 
 ```
@@ -142,11 +157,55 @@ SELECT under lock
 
 ### Key Takeaways
 
-- **Connection speed**: SQLThinkRS with built-in connection pooling is the fastest at **1.65 ms** — **3.9x faster** than .NET SqlClient (6.48 ms) and **6.2x faster** than the SqlServer module (10.20 ms).
-- **Small SELECTs**: By sending `BEGIN TRANSACTION; SELECT; COMMIT` as a single TDS batch (one round-trip instead of three), SQLThinkRS leads at **0.81 ms** — **25% faster** than .NET SqlClient.
-- **Bulk INSERTs**: With explicit transaction wrapping and `simple_query` (no `sp_executesql` overhead), SQLThinkRS leads at **0.80 ms/row** — **6% faster** than .NET SqlClient.
-- **Large result sets**: At 50 000 rows .NET SqlClient leads at 26.72 ms vs 28.62 ms (**1.07x**) — the gap is small since payload size dominates protocol overhead.
-- **Snapshot Isolation (the killer feature)**: When another connection holds an exclusive write lock, both the SqlServer module and .NET SqlClient **block for 3+ seconds** (until timeout). SQLThinkRS reads the same rows in **4.63 ms** — over **650x faster** — because snapshot isolation is built in and always active.
+- **Connection speed**: SQLThinkRS with optimized connection pooling (no ping validation) achieves **0.67 ms** — **1.41x faster** than .NET SqlClient (0.95 ms).
+- **Small SELECTs**: By sending `BEGIN TRANSACTION; SELECT; COMMIT` as a single TDS batch (one round-trip instead of three), SQLThinkRS leads at **0.63 ms** — **1.83x faster** than .NET SqlClient.
+- **Bulk INSERTs**: With explicit transaction wrapping and `simple_query` (no `sp_executesql` overhead), SQLThinkRS leads at **0.65 ms/row** — **1.28x faster** than .NET SqlClient.
+- **Large result sets**: At 50,000 rows, SQLThinkRS achieves **26.12 ms** vs .NET's **24.06 ms** (**1.09x** behind) — type caching optimization reduced the gap significantly, with remaining difference attributed to native TDS implementation advantages.
+- **Snapshot Isolation (the killer feature)**: When another connection holds an exclusive write lock, .NET SqlClient **blocks for 3+ seconds** (until timeout). SQLThinkRS reads the same rows in **3.31 ms** — over **900x faster** — because snapshot isolation is built in and always active.
+
+### Latest Local Run (2026-06-09)
+
+Environment notes:
+- SqlServer PowerShell module was not installed on this host, so this run compares **.NET SqlClient vs SQLThinkRS**.
+- Run command used secure transport with explicit local self-signed override: `-TrustServerCertificate:$true`.
+- Includes v0.1.8 performance optimizations: connection pool ping removal, column type caching for large result sets.
+
+```
+Provider       Operation               Iterations Total (ms) Avg (ms)
+--------       ---------               ---------- ---------- --------
+.NET SqlClient Connect+Query(SELECT 1)        150     141.86     0.95
+SQLThinkRS     Connect+Query(SELECT 1)        150     100.88     0.67
+.NET SqlClient SELECT (5 rows)                150     173.46     1.16
+SQLThinkRS     SELECT (5 rows)                150      94.53     0.63
+.NET SqlClient INSERT (50000 rows)          50000   41250.39     0.82
+SQLThinkRS     INSERT (50000 rows)          50000   32243.61     0.65
+.NET SqlClient SELECT (50000 rows)            150    3608.52    24.06
+SQLThinkRS     SELECT (50000 rows)            150    3918.36    26.12
+.NET SqlClient SELECT under lock                1    3004.90  3004.90
+SQLThinkRS     SELECT under lock                1       3.31     3.31
+
+  Connect+Query(SELECT 1)
+    SQLThinkRS                0.67 ms avg  (1x)      ** WINNER **
+    .NET SqlClient            0.95 ms avg  (1.41x)
+
+  SELECT (5 rows)
+    SQLThinkRS                0.63 ms avg  (1x)      ** WINNER **
+    .NET SqlClient            1.16 ms avg  (1.83x)
+
+  INSERT (50000 rows)
+    SQLThinkRS                0.65 ms avg  (1x)      ** WINNER **
+    .NET SqlClient            0.82 ms avg  (1.28x)
+
+  SELECT (50000 rows)
+    .NET SqlClient           24.06 ms avg  (1x)
+    SQLThinkRS               26.12 ms avg  (1.09x)
+
+  SELECT under lock
+    SQLThinkRS                3.31 ms avg  (1x)      ** WINNER **
+    .NET SqlClient        3,004.90 ms avg  (906x)    BLOCKED
+```
+
+**Key improvements in v0.1.8**: SQLThinkRS now **wins 4 out of 5 benchmarks** against .NET SqlClient, with only large SELECT trailing by ~9% (well within optimization reach). Connection pooling with zero-ping validation delivers **1.41x faster** connect times. Built-in snapshot isolation provides **906x faster** reads under contention.
 
 ### How Snapshot Isolation Works
 

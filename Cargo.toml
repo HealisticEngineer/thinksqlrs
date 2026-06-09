@@ -1,6 +1,6 @@
 [package]
 name = "sqlthinkrs"
-version = "0.1.7"
+version = "0.1.9"
 edition = "2024"
 
 [lib]
@@ -19,3 +19,4 @@ regex = "1"
 opt-level = 3
 lto = true
 codegen-units = 1
+strip = true

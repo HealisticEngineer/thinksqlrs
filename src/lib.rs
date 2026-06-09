@@ -12,6 +12,17 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 type TibClient = Client<tokio_util::compat::Compat<TcpStream>>;
 
+// Column type cache for fast type-specific extraction
+#[derive(Debug, Clone, Copy)]
+enum ColumnType {
+    I64,
+    I32,
+    Str,
+    F64,
+    Bool,
+    Other,
+}
+
 // Global trace flag
 static TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -51,6 +62,10 @@ static CONN_POOL: OnceCell<Mutex<HashMap<String, Vec<TibClient>>>> = OnceCell::n
 // Stores the connection string used by the current active connection so that
 // DisconnectDb can return the client to the correct pool bucket.
 static CONN_KEY: OnceCell<Mutex<Option<String>>> = OnceCell::new();
+
+// Keep pool growth bounded per connection string to avoid unbounded idle-client
+// accumulation while preserving reuse wins.
+const MAX_IDLE_PER_CONN_STR: usize = 8;
 
 fn get_pool() -> &'static Mutex<HashMap<String, Vec<TibClient>>> {
     CONN_POOL.get_or_init(|| Mutex::new(HashMap::new()))
@@ -101,26 +116,11 @@ pub extern "C" fn ConnectDb(conn_str: *const c_char) -> *const c_char {
         pool.get_mut(conn_string).and_then(|v| v.pop())
     };
 
-    let result = if let Some(mut client) = pooled {
-        // Validate the pooled connection with a lightweight ping
+    let result = if let Some(client) = pooled {
+        // Reuse pooled connection directly without ping validation.
+        // If stale, the first query will fail and the user can reconnect.
         trace("Pool HIT - reusing pooled connection");
-        let ok = runtime.block_on(async {
-            client
-                .simple_query("/* ping */")
-                .await
-                .map_err(|e| format!("Pooled connection stale: {}", e))?
-                .into_results()
-                .await
-                .map_err(|e| format!("Pooled connection stale: {}", e))?;
-            Ok::<_, String>(client)
-        });
-        match ok {
-            Ok(c) => Ok(c),
-            Err(_) => {
-                trace("Pooled connection stale - opening fresh connection");
-                runtime.block_on(open_new_connection_async(config))
-            }
-        }
+        Ok(client)
     } else {
         trace("Pool MISS - opening new connection");
         runtime.block_on(open_new_connection_async(config))
@@ -189,7 +189,12 @@ pub extern "C" fn DisconnectDb() {
             if let Some(key) = key {
                 trace("Returning connection to pool");
                 let mut pool = get_pool().lock().unwrap();
-                pool.entry(key).or_default().push(client);
+                let bucket = pool.entry(key).or_default();
+                if bucket.len() < MAX_IDLE_PER_CONN_STR {
+                    bucket.push(client);
+                } else {
+                    trace("Pool bucket full - dropping idle connection");
+                }
             }
             // else: no key stored — just drop
         }
@@ -359,6 +364,8 @@ fn create_error_string(msg: &str) -> *const c_char {
 // Parse connection string into tiberius Config
 fn parse_connection_string(conn_str: &str) -> Result<Config, String> {
     let mut config = Config::new();
+    let mut user: Option<String> = None;
+    let mut password: Option<String> = None;
     
     for part in conn_str.split(';') {
         let part = part.trim();
@@ -381,10 +388,9 @@ fn parse_connection_string(conn_str: &str) -> Result<Config, String> {
                     config.port(port);
                 }
             }
-            "user id" | "uid" | "user" => config.authentication(tiberius::AuthMethod::sql_server(value, "")),
+            "user id" | "uid" | "user" => user = Some(value.to_string()),
             "password" | "pwd" => {
-                // Password is set with user id, need to re-set authentication
-                // This is a simplified approach; you may need to store and combine user/password
+                password = Some(value.to_string());
             }
             "database" | "initial catalog" => config.database(value),
             "trust server certificate" => {
@@ -396,33 +402,11 @@ fn parse_connection_string(conn_str: &str) -> Result<Config, String> {
         }
     }
 
-    // Parse user and password together
-    let mut user = String::new();
-    let mut password = String::new();
-
-    for part in conn_str.split(';') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-
-        let key_value: Vec<&str> = part.splitn(2, '=').collect();
-        if key_value.len() != 2 {
-            continue;
-        }
-
-        let key = key_value[0].trim().to_lowercase();
-        let value = key_value[1].trim();
-
-        match key.as_str() {
-            "user id" | "uid" | "user" => user = value.to_string(),
-            "password" | "pwd" => password = value.to_string(),
-            _ => {}
-        }
-    }
-
-    if !user.is_empty() {
-        config.authentication(tiberius::AuthMethod::sql_server(user, password));
+    if let Some(user) = user {
+        config.authentication(tiberius::AuthMethod::sql_server(
+            user,
+            password.unwrap_or_default(),
+        ));
     }
 
     Ok(config)
@@ -488,21 +472,44 @@ async fn execute_select_query(
     let num_rows = rows.len();
     trace(&format!("SELECT returned {} rows", num_rows));
 
+    // Pre-allocate with exact capacity and cache column names
     let mut results: Vec<serde_json::Map<String, Value>> = Vec::with_capacity(num_rows);
+    let column_names: Vec<String> = rows
+        .first()
+        .map(|r| r.columns().iter().map(|c| c.name().to_owned()).collect())
+        .unwrap_or_default();
 
+    // Detect column types from first row to avoid repeated type checks
+    let column_types: Vec<ColumnType> = if let Some(first_row) = rows.first() {
+        (0..column_names.len())
+            .map(|i| detect_column_type(first_row, i))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Build row maps using cached column names and types
     for row in &rows {
-        let columns = row.columns();
-        let mut row_map = serde_json::Map::with_capacity(columns.len());
-
-        for (i, column) in columns.iter().enumerate() {
-            row_map.insert(column.name().to_string(), row_to_json_value(row, i));
+        let mut row_map = serde_json::Map::with_capacity(column_names.len());
+        for (i, name) in column_names.iter().enumerate() {
+            let value = match column_types.get(i) {
+                Some(ColumnType::I64) => row.try_get::<i64, _>(i).ok().flatten().map(|v| Value::Number(v.into())),
+                Some(ColumnType::I32) => row.try_get::<i32, _>(i).ok().flatten().map(|v| Value::Number(v.into())),
+                Some(ColumnType::Str) => row.try_get::<&str, _>(i).ok().flatten().map(|v| Value::String(v.to_string())),
+                Some(ColumnType::F64) => row.try_get::<f64, _>(i).ok().flatten().and_then(|v| serde_json::Number::from_f64(v).map(Value::Number)),
+                Some(ColumnType::Bool) => row.try_get::<bool, _>(i).ok().flatten().map(Value::Bool),
+                _ => None,
+            };
+            row_map.insert(name.clone(), value.unwrap_or(Value::Null));
         }
-
         results.push(row_map);
     }
 
-    let json = serde_json::to_string(&results)
+    // Serialize directly to bytes (more efficient than to_string for large payloads)
+    let json_bytes = serde_json::to_vec(&results)
         .map_err(|e| format!("Failed to marshal JSON: {}", e))?;
+    let json = String::from_utf8(json_bytes)
+        .map_err(|e| format!("Failed to convert JSON bytes to string: {}", e))?;
 
     Ok(Some(json))
 }
@@ -525,26 +532,22 @@ async fn execute_non_select(
     Ok(None) // Success
 }
 
-/// Convert a row value to JSON Value
-fn row_to_json_value(row: &tiberius::Row, index: usize) -> Value {
-    // Try different types
-    if let Some(val) = row.try_get::<&str, _>(index).ok().flatten() {
-        return Value::String(val.to_string());
+/// Detect column type from first row to avoid repeated type checks per cell
+fn detect_column_type(row: &tiberius::Row, index: usize) -> ColumnType {
+    if row.try_get::<i64, _>(index).ok().flatten().is_some() {
+        return ColumnType::I64;
     }
-    if let Some(val) = row.try_get::<i32, _>(index).ok().flatten() {
-        return Value::Number(val.into());
+    if row.try_get::<i32, _>(index).ok().flatten().is_some() {
+        return ColumnType::I32;
     }
-    if let Some(val) = row.try_get::<i64, _>(index).ok().flatten() {
-        return Value::Number(val.into());
+    if row.try_get::<&str, _>(index).ok().flatten().is_some() {
+        return ColumnType::Str;
     }
-    if let Some(val) = row.try_get::<f64, _>(index).ok().flatten() {
-        if let Some(num) = serde_json::Number::from_f64(val) {
-            return Value::Number(num);
-        }
+    if row.try_get::<f64, _>(index).ok().flatten().is_some() {
+        return ColumnType::F64;
     }
-    if let Some(val) = row.try_get::<bool, _>(index).ok().flatten() {
-        return Value::Bool(val);
+    if row.try_get::<bool, _>(index).ok().flatten().is_some() {
+        return ColumnType::Bool;
     }
-
-    Value::Null
+    ColumnType::Other
 }

@@ -58,7 +58,10 @@ param(
     [string]$UserId       = "sa",
     [string]$Password     = "NeverSafe2Day!",
     [int]$Iterations      = 150,
-    [int]$BulkRows        = 50000
+    [int]$BulkRows        = 50000,
+    [int]$WarmupIterations = 10,
+    [bool]$Encrypt = $true,
+    [bool]$TrustServerCertificate = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,10 +74,51 @@ function Write-Ok      { param([string]$Text) Write-Host "  [OK] $Text" -Foregro
 function Write-Err     { param([string]$Text) Write-Host "  [FAIL] $Text" -ForegroundColor Red }
 function Write-Info    { param([string]$Text) Write-Host "  $Text" -ForegroundColor Gray }
 
+function Invoke-Warmup {
+    param(
+        [int]$Count,
+        [string]$Label,
+        [scriptblock]$Action
+    )
+
+    if ($Count -le 0) {
+        return
+    }
+
+    Write-Info "Warmup: $Label ($Count iterations)"
+    for ($i = 0; $i -lt $Count; $i++) {
+        & $Action
+    }
+}
+
 # ── Result accumulator ──────────────────────────────────────────────────────
 # Every benchmark appends one [PSCustomObject] per provider via Add-Result.
 # The final summary table and per-operation rankings are built from this list.
 $script:Results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+function Invoke-SqlModuleQuery {
+    param(
+        [string]$Sql,
+        [int]$TimeoutSec = 0
+    )
+
+    $params = @{
+        ServerInstance = $ServerName
+        Database = $Database
+        Username = $UserId
+        Password = $Password
+        Query = $Sql
+    }
+
+    if ($TrustServerCertificate) {
+        $params.TrustServerCertificate = $true
+    }
+    if ($TimeoutSec -gt 0) {
+        $params.QueryTimeout = $TimeoutSec
+    }
+
+    Invoke-Sqlcmd @params
+}
 
 function Add-Result {
     param([string]$Provider, [string]$Operation, [double]$TotalMs, [int]$Iterations)
@@ -93,8 +137,9 @@ function Add-Result {
 # ADO.NET and the Rust DLL use slightly different key names; both connect to
 # the same SQL Server instance with SQL authentication.
 # ============================================================================
-$connStringAdo   = "Server=$ServerName;Database=$Database;User Id=$UserId;Password=$Password;TrustServerCertificate=True;Connection Timeout=30;"
-$connStringRust  = "server=$ServerName;user id=$UserId;password=$Password;database=$Database;trust server certificate=true"
+$trustValue = if ($TrustServerCertificate) { "true" } else { "false" }
+$connStringAdo   = "Server=$ServerName;Database=$Database;User Id=$UserId;Password=$Password;Encrypt=$Encrypt;TrustServerCertificate=$TrustServerCertificate;Connection Timeout=30;"
+$connStringRust  = "server=$ServerName;user id=$UserId;password=$Password;database=$Database;trust server certificate=$trustValue"
 
 # ============================================================================
 # 1. SETUP - Load Providers
@@ -105,6 +150,9 @@ Write-Info "Server       : $ServerName"
 Write-Info "Database     : $Database"
 Write-Info "Iterations   : $Iterations"
 Write-Info "Bulk Rows    : $BulkRows"
+Write-Info "Warmup       : $WarmupIterations"
+Write-Info "Encrypt      : $Encrypt"
+Write-Info "TrustCert    : $TrustServerCertificate"
 
 # ── 1a. SQLServer PowerShell Module ─────────────────────────────────────────
 Write-Section "Loading SqlServer PowerShell module"
@@ -261,12 +309,13 @@ Write-Header "BENCHMARK: Connection Time ($Iterations iterations)"
 # ── SqlServer Module ────────────────────────────────────────────────────────
 if ($hasSqlModule) {
     Write-Section "SqlServer Module - Connection"
+    Invoke-Warmup -Count $WarmupIterations -Label "SqlServer Module Connect+Query" -Action {
+        Invoke-SqlModuleQuery -Sql "SELECT 1 AS Test" | Out-Null
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $Iterations; $i++) {
         # Invoke-Sqlcmd connects per call, so we just fire a trivial query
-        Invoke-Sqlcmd -ServerInstance $ServerName -Database $Database `
-            -Username $UserId -Password $Password `
-            -TrustServerCertificate -Query "SELECT 1 AS Test" | Out-Null
+        Invoke-SqlModuleQuery -Sql "SELECT 1 AS Test" | Out-Null
     }
     $sw.Stop()
     Add-Result "SqlServer Module" "Connect+Query(SELECT 1)" $sw.Elapsed.TotalMilliseconds $Iterations
@@ -276,6 +325,13 @@ if ($hasSqlModule) {
 # ── .NET SqlClient ──────────────────────────────────────────────────────────
 if ($hasDotNet) {
     Write-Section ".NET SqlClient - Connection"
+    Invoke-Warmup -Count $WarmupIterations -Label ".NET Connect+Query" -Action {
+        $wc = New-Object "$sqlClientType.SqlConnection" $connStringAdo
+        $wc.Open()
+        $wcmd = $wc.CreateCommand(); $wcmd.CommandText = "SELECT 1 AS Test"
+        $null = $wcmd.ExecuteScalar()
+        $wcmd.Dispose(); $wc.Close(); $wc.Dispose()
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $Iterations; $i++) {
         $c = New-Object "$sqlClientType.SqlConnection" $connStringAdo
@@ -292,6 +348,13 @@ if ($hasDotNet) {
 # ── SQLThinkRS ──────────────────────────────────────────────────────────────
 if ($hasRust) {
     Write-Section "SQLThinkRS - Connection"
+    Invoke-Warmup -Count $WarmupIterations -Label "SQLThinkRS Connect+Query" -Action {
+        $werr = [SqlThinkRSPerf]::Connect($connStringRust)
+        if ($werr) { throw "Rust connect failed: $werr" }
+        $wres = [SqlThinkRSPerf]::Execute("SELECT 1 AS Test")
+        if ($wres -and $wres.StartsWith("ERROR:")) { throw $wres }
+        [SqlThinkRSPerf]::DisconnectDb()
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $Iterations; $i++) {
         $err = [SqlThinkRSPerf]::Connect($connStringRust)
@@ -328,20 +391,19 @@ if ($hasDotNet) {
     $seedConn.Close(); $seedConn.Dispose()
     Write-Info "Seeded tempdb.dbo.PerfTest table (5 rows)"
 } elseif ($hasSqlModule) {
-    Invoke-Sqlcmd -ServerInstance $ServerName -Database $Database `
-        -Username $UserId -Password $Password `
-        -TrustServerCertificate -Query $setupSql
+    Invoke-SqlModuleQuery -Sql $setupSql
     Write-Info "Seeded ##PerfTest table (5 rows)"
 }
 
 # ── SqlServer Module ────────────────────────────────────────────────────────
 if ($hasSqlModule) {
     Write-Section "SqlServer Module - Repeated SELECT"
+    Invoke-Warmup -Count $WarmupIterations -Label "SqlServer Module SELECT (5 rows)" -Action {
+        $null = Invoke-SqlModuleQuery -Sql $selectSql
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $Iterations; $i++) {
-        $null = Invoke-Sqlcmd -ServerInstance $ServerName -Database $Database `
-            -Username $UserId -Password $Password `
-            -TrustServerCertificate -Query $selectSql
+        $null = Invoke-SqlModuleQuery -Sql $selectSql
     }
     $sw.Stop()
     Add-Result "SqlServer Module" "SELECT (5 rows)" $sw.Elapsed.TotalMilliseconds $Iterations
@@ -353,6 +415,9 @@ if ($hasDotNet) {
     Write-Section ".NET SqlClient - Repeated SELECT (persistent connection)"
     $dotnetConn = New-Object "$sqlClientType.SqlConnection" $connStringAdo
     $dotnetConn.Open()
+    Invoke-Warmup -Count $WarmupIterations -Label ".NET SELECT (5 rows)" -Action {
+        $null = Invoke-DotNetSql -Connection $dotnetConn -Sql $selectSql -Query
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $Iterations; $i++) {
         $null = Invoke-DotNetSql -Connection $dotnetConn -Sql $selectSql -Query
@@ -368,6 +433,10 @@ if ($hasRust) {
     Write-Section "SQLThinkRS - Repeated SELECT (persistent connection)"
     $err = [SqlThinkRSPerf]::Connect($connStringRust)
     if ($err) { throw "Rust connect failed: $err" }
+    Invoke-Warmup -Count $WarmupIterations -Label "SQLThinkRS SELECT (5 rows)" -Action {
+        $wres = [SqlThinkRSPerf]::Execute($selectSql)
+        if ($wres -and $wres.StartsWith("ERROR:")) { throw $wres }
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $Iterations; $i++) {
         $res = [SqlThinkRSPerf]::Execute($selectSql)
@@ -395,16 +464,11 @@ CREATE TABLE tempdb.dbo.PerfBulk (Id INT IDENTITY PRIMARY KEY, Name NVARCHAR(100
 # ── SqlServer Module ────────────────────────────────────────────────────────
 if ($hasSqlModule) {
     Write-Section "SqlServer Module - Bulk INSERT"
-    Invoke-Sqlcmd -ServerInstance $ServerName -Database $Database `
-        -Username $UserId -Password $Password `
-        -TrustServerCertificate -Query $bulkSetup
+    Invoke-SqlModuleQuery -Sql $bulkSetup
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 1; $i -le $BulkRows; $i++) {
-        Invoke-Sqlcmd -ServerInstance $ServerName -Database $Database `
-            -Username $UserId -Password $Password `
-            -TrustServerCertificate `
-            -Query "INSERT INTO tempdb.dbo.PerfBulk (Name, Value) VALUES ('Item_$i', $i)"
+        Invoke-SqlModuleQuery -Sql "INSERT INTO tempdb.dbo.PerfBulk (Name, Value) VALUES ('Item_$i', $i)"
     }
     $sw.Stop()
     Add-Result "SqlServer Module" "INSERT ($BulkRows rows)" $sw.Elapsed.TotalMilliseconds $BulkRows
@@ -472,9 +536,7 @@ INSERT INTO tempdb.dbo.PerfLarge (Name, Value) SELECT 'Row_' + CAST(n AS VARCHAR
     $seedConn.Close(); $seedConn.Dispose()
     Write-Info "Seeded tempdb.dbo.PerfLarge table ($BulkRows rows)"
 } elseif ($hasSqlModule) {
-    Invoke-Sqlcmd -ServerInstance $ServerName -Database $Database `
-        -Username $UserId -Password $Password `
-        -TrustServerCertificate -Query @"
+    Invoke-SqlModuleQuery -Sql @"
 IF OBJECT_ID('tempdb.dbo.PerfLarge', 'U') IS NOT NULL DROP TABLE tempdb.dbo.PerfLarge;
 CREATE TABLE tempdb.dbo.PerfLarge (Id INT IDENTITY PRIMARY KEY, Name NVARCHAR(100), Value INT);
 ;WITH Nums AS (SELECT TOP ($BulkRows) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.objects a CROSS JOIN sys.objects b)
@@ -488,11 +550,12 @@ $largeSql = "SELECT Id, Name, Value FROM tempdb.dbo.PerfLarge"
 # ── SqlServer Module ────────────────────────────────────────────────────────
 if ($hasSqlModule) {
     Write-Section "SqlServer Module - Large SELECT ($BulkRows rows)"
+    Invoke-Warmup -Count $WarmupIterations -Label "SqlServer Module SELECT ($BulkRows rows)" -Action {
+        $null = Invoke-SqlModuleQuery -Sql $largeSql
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $Iterations; $i++) {
-        $null = Invoke-Sqlcmd -ServerInstance $ServerName -Database $Database `
-            -Username $UserId -Password $Password `
-            -TrustServerCertificate -Query $largeSql
+        $null = Invoke-SqlModuleQuery -Sql $largeSql
     }
     $sw.Stop()
     Add-Result "SqlServer Module" "SELECT ($BulkRows rows)" $sw.Elapsed.TotalMilliseconds $Iterations
@@ -504,6 +567,9 @@ if ($hasDotNet) {
     Write-Section ".NET SqlClient - Large SELECT ($BulkRows rows, persistent connection)"
     $dotnetConn = New-Object "$sqlClientType.SqlConnection" $connStringAdo
     $dotnetConn.Open()
+    Invoke-Warmup -Count $WarmupIterations -Label ".NET SELECT ($BulkRows rows)" -Action {
+        $null = Invoke-DotNetSql -Connection $dotnetConn -Sql $largeSql -Query
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $Iterations; $i++) {
         $null = Invoke-DotNetSql -Connection $dotnetConn -Sql $largeSql -Query
@@ -519,6 +585,10 @@ if ($hasRust) {
     Write-Section "SQLThinkRS - Large SELECT ($BulkRows rows, persistent connection)"
     $err = [SqlThinkRSPerf]::Connect($connStringRust)
     if ($err) { throw "Rust connect failed: $err" }
+    Invoke-Warmup -Count $WarmupIterations -Label "SQLThinkRS SELECT ($BulkRows rows)" -Action {
+        $wres = [SqlThinkRSPerf]::Execute($largeSql)
+        if ($wres -and $wres.StartsWith("ERROR:")) { throw $wres }
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $Iterations; $i++) {
         $res = [SqlThinkRSPerf]::Execute($largeSql)
@@ -606,10 +676,7 @@ if ($hasSqlModule) {
     Write-Section "SqlServer Module - SELECT under lock (READ COMMITTED, ${lockTimeoutSec}s timeout)"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $null = Invoke-Sqlcmd -ServerInstance $ServerName -Database $Database `
-            -Username $UserId -Password $Password `
-            -TrustServerCertificate -Query $lockSelectSql `
-            -QueryTimeout $lockTimeoutSec -ErrorAction Stop
+        $null = Invoke-SqlModuleQuery -Sql $lockSelectSql -TimeoutSec $lockTimeoutSec
         $sw.Stop()
         Add-Result "SqlServer Module" "SELECT under lock" $sw.Elapsed.TotalMilliseconds 1
         Write-Ok "Completed in $([math]::Round($sw.Elapsed.TotalMilliseconds, 1)) ms (unexpected - no blocking)"
@@ -739,9 +806,7 @@ try {
         Invoke-DotNetSql -Connection $cleanupConn -Sql "IF OBJECT_ID('tempdb.dbo.PerfLock','U')  IS NOT NULL DROP TABLE tempdb.dbo.PerfLock"
         $cleanupConn.Close(); $cleanupConn.Dispose()
     } elseif ($hasSqlModule) {
-        Invoke-Sqlcmd -ServerInstance $ServerName -Database $Database `
-            -Username $UserId -Password $Password `
-            -TrustServerCertificate -Query @"
+        Invoke-SqlModuleQuery -Sql @"
 IF OBJECT_ID('tempdb.dbo.PerfTest','U')  IS NOT NULL DROP TABLE tempdb.dbo.PerfTest;
 IF OBJECT_ID('tempdb.dbo.PerfBulk','U')  IS NOT NULL DROP TABLE tempdb.dbo.PerfBulk;
 IF OBJECT_ID('tempdb.dbo.PerfLarge','U') IS NOT NULL DROP TABLE tempdb.dbo.PerfLarge;
