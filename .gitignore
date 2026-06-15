@@ -3,6 +3,9 @@
 Cargo.lock
 **/*.rs.bk
 
+# Release artifacts
+/release/
+
 # IDE
 .vscode/
 .idea/
