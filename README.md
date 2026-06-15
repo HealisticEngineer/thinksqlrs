@@ -104,108 +104,118 @@ Compared against the **SqlServer PowerShell module** (`Invoke-Sqlcmd`) and **.NE
 
 Use `-TrustServerCertificate:$false` in environments with trusted server certificates.
 
-### Results Summary (150 iterations, 50 000 rows)
+### Results Summary (150 iterations, 50,000 rows)
 
 ```
-Provider         Operation                Iterations  Total (ms)  Avg (ms)
---------         ---------                ----------  ----------  --------
-SqlServer Module Connect+Query(SELECT 1)         150    1,530.66    10.20
-.NET SqlClient   Connect+Query(SELECT 1)         150      971.84     6.48
-SQLThinkRS       Connect+Query(SELECT 1)         150      247.69     1.65
-SqlServer Module SELECT (5 rows)                 150      140.40     0.94
-.NET SqlClient   SELECT (5 rows)                 150      150.96     1.01
-SQLThinkRS       SELECT (5 rows)                 150      120.84     0.81
-SqlServer Module INSERT (50000 rows)           50000   45,385.01     0.91
-.NET SqlClient   INSERT (50000 rows)           50000   42,381.02     0.85
-SQLThinkRS       INSERT (50000 rows)           50000   39,888.13     0.80
-SqlServer Module SELECT (50000 rows)             150    4,047.05    26.98
-.NET SqlClient   SELECT (50000 rows)             150    4,007.74    26.72
-SQLThinkRS       SELECT (50000 rows)             150    4,293.59    28.62
-SqlServer Module SELECT under lock                 1    3,028.27  3028.27
-.NET SqlClient   SELECT under lock                 1    3,007.43  3007.43
-SQLThinkRS       SELECT under lock                 1        4.63     4.63
+Provider         Operation               Iterations Total (ms) Avg (ms)
+--------         ---------               ---------- ---------- --------
+SqlServer Module Connect+Query(SELECT 1)        150     160.28     1.07
+.NET SqlClient   Connect+Query(SELECT 1)        150     129.63     0.86
+SQLThinkRS       Connect+Query(SELECT 1)        150      97.91     0.65
+SqlServer Module SELECT (5 rows)                150     150.84     1.01
+.NET SqlClient   SELECT (5 rows)                150     146.42     0.98
+SQLThinkRS       SELECT (5 rows)                150      92.63     0.62
+SqlServer Module INSERT (50000 rows)          50000   43013.71     0.86
+.NET SqlClient   INSERT (50000 rows)          50000   40790.23     0.82
+SQLThinkRS       INSERT (50000 rows)          50000   32055.98     0.64
+SqlServer Module SELECT (50000 rows)            150    2466.99    16.45
+.NET SqlClient   SELECT (50000 rows)            150    3351.59    22.34
+SQLThinkRS       SELECT (50000 rows)            150    3875.31    25.84
+SqlServer Module SELECT under lock                1    3008.25  3008.25
+.NET SqlClient   SELECT under lock                1    3002.85  3002.85
+SQLThinkRS       SELECT under lock                1       3.10     3.10
 ```
 
 ### Comparative Ranking
 
 ```
 Connect+Query(SELECT 1)
-  SQLThinkRS                1.65 ms avg  (1x)      ** WINNER **
-  .NET SqlClient            6.48 ms avg  (3.92x)
-  SqlServer Module         10.20 ms avg  (6.18x)
+  SQLThinkRS                0.65 ms avg  (1x)      ** WINNER **
+  .NET SqlClient            0.86 ms avg  (1.32x)
+  SqlServer Module          1.07 ms avg  (1.64x)
 
 SELECT (5 rows)
-  SQLThinkRS                0.81 ms avg  (1x)      ** WINNER **
-  SqlServer Module          0.94 ms avg  (1.16x)
-  .NET SqlClient            1.01 ms avg  (1.25x)
+  SQLThinkRS                0.62 ms avg  (1x)      ** WINNER **
+  .NET SqlClient            0.98 ms avg  (1.58x)
+  SqlServer Module          1.01 ms avg  (1.63x)
 
 INSERT (50000 rows)
-  SQLThinkRS                0.80 ms avg  (1x)      ** WINNER **
-  .NET SqlClient            0.85 ms avg  (1.06x)
-  SqlServer Module          0.91 ms avg  (1.14x)
+  SQLThinkRS                0.64 ms avg  (1x)      ** WINNER **
+  .NET SqlClient            0.82 ms avg  (1.27x)
+  SqlServer Module          0.86 ms avg  (1.34x)
 
 SELECT (50000 rows)
-  .NET SqlClient           26.72 ms avg  (1x)
-  SqlServer Module         26.98 ms avg  (1.01x)
-  SQLThinkRS               28.62 ms avg  (1.07x)
+  SqlServer Module         16.45 ms avg  (1x)
+  .NET SqlClient           22.34 ms avg  (1.36x)
+  SQLThinkRS               25.84 ms avg  (1.57x)
 
 SELECT under lock
-  SQLThinkRS                4.63 ms avg  (1x)      ** WINNER **
-  .NET SqlClient        3,007.43 ms avg  (650x)    BLOCKED
-  SqlServer Module      3,028.27 ms avg  (655x)    BLOCKED
+  SQLThinkRS                3.10 ms avg  (1x)      ** WINNER **
+  .NET SqlClient        3002.85 ms avg  (969.6x)   BLOCKED
+  SqlServer Module      3008.25 ms avg  (971.3x)   BLOCKED
 ```
 
 ### Key Takeaways
 
-- **Connection speed**: SQLThinkRS with optimized connection pooling (no ping validation) achieves **0.67 ms** — **1.41x faster** than .NET SqlClient (0.95 ms).
-- **Small SELECTs**: By sending `BEGIN TRANSACTION; SELECT; COMMIT` as a single TDS batch (one round-trip instead of three), SQLThinkRS leads at **0.63 ms** — **1.83x faster** than .NET SqlClient.
-- **Bulk INSERTs**: With explicit transaction wrapping and `simple_query` (no `sp_executesql` overhead), SQLThinkRS leads at **0.65 ms/row** — **1.28x faster** than .NET SqlClient.
-- **Large result sets**: At 50,000 rows, SQLThinkRS achieves **26.12 ms** vs .NET's **24.06 ms** (**1.09x** behind) — type caching optimization reduced the gap significantly, with remaining difference attributed to native TDS implementation advantages.
-- **Snapshot Isolation (the killer feature)**: When another connection holds an exclusive write lock, .NET SqlClient **blocks for 3+ seconds** (until timeout). SQLThinkRS reads the same rows in **3.31 ms** — over **900x faster** — because snapshot isolation is built in and always active.
+- **Connection speed**: SQLThinkRS with optimized connection pooling (no ping validation) achieves **0.65 ms** — **1.32x faster** than .NET SqlClient (0.86 ms).
+- **Small SELECTs**: By sending `BEGIN TRANSACTION; SELECT; COMMIT` as a single TDS batch (one round-trip instead of three), SQLThinkRS leads at **0.62 ms** — **1.58x faster** than .NET SqlClient.
+- **Bulk INSERTs**: With explicit transaction wrapping and `simple_query` (no `sp_executesql` overhead), SQLThinkRS leads at **0.64 ms/row** — **1.27x faster** than .NET SqlClient.
+- **Large result sets**: At 50,000 rows, SQLThinkRS achieves **25.84 ms** vs SqlServer Module's **16.45 ms** (**1.57x** behind) — this gap is due to SqlServer Module's optimized result set parsing and type conversion paths.
+- **Snapshot Isolation (the killer feature)**: When another connection holds an exclusive write lock, .NET SqlClient **blocks for 3+ seconds** (until timeout). SQLThinkRS reads the same rows in **3.10 ms** — over **969x faster** — because snapshot isolation is built in and always active.
 
-### Latest Local Run (2026-06-09)
+### Latest Local Run (2026-06-15)
 
 Environment notes:
-- SqlServer PowerShell module was not installed on this host, so this run compares **.NET SqlClient vs SQLThinkRS**.
-- Run command used secure transport with explicit local self-signed override: `-TrustServerCertificate:$true`.
-- Includes v0.1.8 performance optimizations: connection pool ping removal, column type caching for large result sets.
+- All three providers tested: **SqlServer PowerShell module (22.4.5.1)**, **.NET SqlClient**, and **SQLThinkRS v0.1.10**.
+- Run command used secure transport with explicit local self-signed override: `-TrustServerCertificate $true`.
+- Includes all performance optimizations: connection pool ping removal, column type caching for large result sets.
 
 ```
-Provider       Operation               Iterations Total (ms) Avg (ms)
---------       ---------               ---------- ---------- --------
-.NET SqlClient Connect+Query(SELECT 1)        150     141.86     0.95
-SQLThinkRS     Connect+Query(SELECT 1)        150     100.88     0.67
-.NET SqlClient SELECT (5 rows)                150     173.46     1.16
-SQLThinkRS     SELECT (5 rows)                150      94.53     0.63
-.NET SqlClient INSERT (50000 rows)          50000   41250.39     0.82
-SQLThinkRS     INSERT (50000 rows)          50000   32243.61     0.65
-.NET SqlClient SELECT (50000 rows)            150    3608.52    24.06
-SQLThinkRS     SELECT (50000 rows)            150    3918.36    26.12
-.NET SqlClient SELECT under lock                1    3004.90  3004.90
-SQLThinkRS     SELECT under lock                1       3.31     3.31
+Provider         Operation               Iterations Total (ms) Avg (ms)
+--------         ---------               ---------- ---------- --------
+SqlServer Module Connect+Query(SELECT 1)        150     160.28     1.07
+.NET SqlClient   Connect+Query(SELECT 1)        150     129.63     0.86
+SQLThinkRS       Connect+Query(SELECT 1)        150      97.91     0.65
+SqlServer Module SELECT (5 rows)                150     150.84     1.01
+.NET SqlClient   SELECT (5 rows)                150     146.42     0.98
+SQLThinkRS       SELECT (5 rows)                150      92.63     0.62
+SqlServer Module INSERT (50000 rows)          50000   43013.71     0.86
+.NET SqlClient   INSERT (50000 rows)          50000   40790.23     0.82
+SQLThinkRS       INSERT (50000 rows)          50000   32055.98     0.64
+SqlServer Module SELECT (50000 rows)            150    2466.99    16.45
+.NET SqlClient   SELECT (50000 rows)            150    3351.59    22.34
+SQLThinkRS       SELECT (50000 rows)            150    3875.31    25.84
+SqlServer Module SELECT under lock                1    3008.25  3008.25
+.NET SqlClient   SELECT under lock                1    3002.85  3002.85
+SQLThinkRS       SELECT under lock                1       3.10     3.10
 
   Connect+Query(SELECT 1)
-    SQLThinkRS                0.67 ms avg  (1x)      ** WINNER **
-    .NET SqlClient            0.95 ms avg  (1.41x)
+    SQLThinkRS                0.65 ms avg  (1x)      ** WINNER **
+    .NET SqlClient            0.86 ms avg  (1.32x)
+    SqlServer Module          1.07 ms avg  (1.64x)
 
   SELECT (5 rows)
-    SQLThinkRS                0.63 ms avg  (1x)      ** WINNER **
-    .NET SqlClient            1.16 ms avg  (1.83x)
+    SQLThinkRS                0.62 ms avg  (1x)      ** WINNER **
+    .NET SqlClient            0.98 ms avg  (1.58x)
+    SqlServer Module          1.01 ms avg  (1.63x)
 
   INSERT (50000 rows)
-    SQLThinkRS                0.65 ms avg  (1x)      ** WINNER **
-    .NET SqlClient            0.82 ms avg  (1.28x)
+    SQLThinkRS                0.64 ms avg  (1x)      ** WINNER **
+    .NET SqlClient            0.82 ms avg  (1.27x)
+    SqlServer Module          0.86 ms avg  (1.34x)
 
   SELECT (50000 rows)
-    .NET SqlClient           24.06 ms avg  (1x)
-    SQLThinkRS               26.12 ms avg  (1.09x)
+    SqlServer Module         16.45 ms avg  (1x)
+    .NET SqlClient           22.34 ms avg  (1.36x)
+    SQLThinkRS               25.84 ms avg  (1.57x)
 
   SELECT under lock
-    SQLThinkRS                3.31 ms avg  (1x)      ** WINNER **
-    .NET SqlClient        3,004.90 ms avg  (906x)    BLOCKED
+    SQLThinkRS                3.10 ms avg  (1x)      ** WINNER **
+    .NET SqlClient        3002.85 ms avg  (969.6x)   BLOCKED
+    SqlServer Module      3008.25 ms avg  (971.3x)   BLOCKED
 ```
 
-**Key improvements in v0.1.8**: SQLThinkRS now **wins 4 out of 5 benchmarks** against .NET SqlClient, with only large SELECT trailing by ~9% (well within optimization reach). Connection pooling with zero-ping validation delivers **1.41x faster** connect times. Built-in snapshot isolation provides **906x faster** reads under contention.
+**Key improvements in v0.1.10**: SQLThinkRS now **wins 4 out of 5 benchmarks** across all three providers, with only large SELECT trailing SqlServer Module by ~57% (due to SqlServer Module's optimized result set parsing). Connection pooling with zero-ping validation delivers **1.32x faster** connect times than .NET SqlClient. Built-in snapshot isolation provides **969x faster** reads under contention.
 
 ### How Snapshot Isolation Works
 

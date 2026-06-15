@@ -1,6 +1,6 @@
 @{
     RootModule        = 'SQLThinkRS.psm1'
-    ModuleVersion     = '0.1.9'
+    ModuleVersion     = '0.1.10'
     GUID              = 'a3f7c8e1-2b4d-4f6a-9e0c-1d2e3f4a5b6c'
     Author            = 'HealisticEngineer'
     Description       = 'PowerShell module for SQLThinkRS - a Rust-based SQL Server client library (Windows)'
